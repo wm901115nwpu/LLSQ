@@ -3,7 +3,7 @@ import sys
 
 import torch.utils.model_zoo as model_zoo
 
-import models.modules as my_nn
+import models._modules as my_nn
 from models import load_pre_state_dict
 from models.cifar10 import _VGGQ
 
@@ -30,6 +30,6 @@ def cifar10_vggsmall_llsq(pretrained=False, **kwargs):
     quan_factory = my_nn.QuantizationFactory(quan_type, **kwargs)
     model = _VGGQ('VGG7', quan_factory)
     if pretrained:
-        load_pre_state_dict(model, model_zoo.load_url(model_urls['vgg7']),
+        load_pre_state_dict(model, model_zoo.load_url(model_urls['vgg7'], map_location='cpu'),
                             '{}_map.json'.format(model_name))
     return model

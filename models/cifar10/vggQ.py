@@ -8,8 +8,8 @@ import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
 
 from models.cifar10 import load_fake_quantized_state_dict
-from models.modules import ActQ, Conv2dQ, LinearQ, PACT, Conv2dQv2, ActQv2, LinearQv2
-from models.modules import Qmodes
+from models._modules import ActQ, Conv2dQ, LinearQ, PACT, Conv2dQv2, ActQv2, LinearQv2
+from models._modules import Qmodes
 
 """
     cifar10_vgg{}_q: don't quantize the first and last layer just like LQ-Net

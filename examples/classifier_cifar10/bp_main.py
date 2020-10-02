@@ -21,11 +21,9 @@ from tensorboardX import SummaryWriter
 from warmup_scheduler import GradualWarmupScheduler
 import models.cifar10 as cifar10_models
 from models.modules import q_modes
-from examples import gen_key_map, add_weight_decay, accuracy, set_bn_eval
+from examples import gen_key_map, accuracy, set_bn_eval
 import BPoptimizer
-import wrapper
-
-import ipdb
+from utils import wrapper
 
 model_names = sorted(name for name in cifar10_models.__dict__
                      if name.islower() and not name.startswith("__")

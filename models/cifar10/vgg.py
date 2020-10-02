@@ -8,7 +8,7 @@ __all__ = [
 ]
 
 model_urls = {
-    'vgg7': 'https://fake/models/cifar10-vgg7-zxd-8943fa3.pth',
+    'vgg7': 'https://github.com/rhhc/zxd_releases/releases/download/Re/cifar10-vggsmall-zxd-93.4-8943fa3.pth',
 }
 
 

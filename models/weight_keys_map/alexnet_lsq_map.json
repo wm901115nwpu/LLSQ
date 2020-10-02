@@ -1,0 +1,18 @@
+{
+  "features.0.weight": "features.0.weight",
+  "features.0.bias": "features.0.bias",
+  "features.4.weight": "features.3.weight",
+  "features.4.bias": "features.3.bias",
+  "features.8.weight": "features.6.weight",
+  "features.8.bias": "features.6.bias",
+  "features.11.weight": "features.8.weight",
+  "features.11.bias": "features.8.bias",
+  "features.14.weight": "features.10.weight",
+  "features.14.bias": "features.10.bias",
+  "classifier.1.weight": "classifier.1.weight",
+  "classifier.1.bias": "classifier.1.bias",
+  "classifier.5.weight": "classifier.4.weight",
+  "classifier.5.bias": "classifier.4.bias",
+  "classifier.7.weight": "classifier.6.weight",
+  "classifier.7.bias": "classifier.6.bias"
+}

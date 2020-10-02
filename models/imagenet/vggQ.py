@@ -3,7 +3,7 @@ import torch.utils.model_zoo as model_zoo
 import math
 import json
 
-from models.modules import ActQ, LinearQ, Conv2dQ
+from models._modules import ActQ, LinearQ, Conv2dQ
 
 __all__ = [
     'VGGQ', 'vggq11', 'vggq11_bn', 'vggq13', 'vggq13_bn', 'vggq16', 'vggq16_bn',

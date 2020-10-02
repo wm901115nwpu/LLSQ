@@ -1,7 +1,6 @@
 from .load_pre_weight import load_fake_quantized_state_dict
 from .vgg import *
 from .vggQ import *
-from .vggBP import *
 from .vgg_ttq import *
 from .vgg_cluster_q import *
 from .resnet_seq import *
@@ -9,3 +8,5 @@ from .resnet_seq_ttq import *
 from .vgg_lsq import *
 from .vggtiny import *
 from .vgg_llsq import *
+from .vgg_dnq import *
+from .vgg_adq import *

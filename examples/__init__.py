@@ -8,36 +8,54 @@ from collections import OrderedDict
 
 import numpy as np
 import torch
+import torch.nn.parallel
+import torch.optim
+import torch.utils.data
+import torch.utils.data.distributed
 import torchvision
 import torchvision.transforms as transforms
-from ptflops import get_model_complexity_info
 from tensorboardX import SummaryWriter
-from torchsummary import summary
 from warmup_scheduler import GradualWarmupScheduler
 
-import utils.custom_datasets as cus_datasets
-import wrapper
-from models.modules import Qmodes
-from utils import DataLoaders_DALI
-import ipdb
+import models._modules as my_nn
+from utils import wrapper
+from utils.dnq import dnq_scheduler
+from utils.ptflops import get_model_complexity_info
 
-str_q_mode_map = {'layer_wise': Qmodes.layer_wise,
-                  'kernel_wise': Qmodes.kernel_wise}
+str_q_mode_map = {'layer_wise': my_nn.Qmodes.layer_wise,
+                  'kernel_wise': my_nn.Qmodes.kernel_wise}
 
 
 def get_base_parser():
     """
         Default values should keep stable.
     """
+
+    print('Please do not import ipdb when using distributed training')
+
     q_modes_choice = sorted(['kernel_wise', 'layer_wise'])
     parser = argparse.ArgumentParser(description='PyTorch Training')
     parser.add_argument('data', metavar='DIR',
                         help='path to dataset')
-    parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
+    parser.add_argument('-j', '--workers', default=16, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
+    parser.add_argument('-b', '--batch-size', default=256, type=int,
+                        metavar='N',
+                        help='mini-batch size (default: 256), this is the total '
+                             'batch size of all GPUs on the current node when '
+                             'using Data Parallel or Distributed Data Parallel')
+    parser.add_argument('-p', '--print-freq', default=50, type=int,
+                        metavar='N', help='print frequency (default: 50)')
+    parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
+                        help='evaluate model on validation set')
 
-    # learning rate schedule
-    parser.add_argument('--epochs', default=400, type=int, metavar='N',
+    # ==========learning rate schedule<<<<<<<<<<<<<
+    parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
+                        metavar='LR', help='initial learning rate', dest='lr')
+    parser.add_argument('--warmup-epoch', type=int, default=-3, help='warm up epoch')
+    parser.add_argument('--warmup-multiplier', type=float, default=10, help='warm up multiplier')
+
+    parser.add_argument('--epochs', default=90, type=int, metavar='N',
                         help='number of total epochs to run')
 
     lr_scheduler_choice = ['StepLR', 'MultiStepLR', 'CosineAnnealingLR']
@@ -49,21 +67,16 @@ def get_base_parser():
                         help='lr decay of StepLR or MultiStepLR')
     parser.add_argument('--milestones', default=[30, 100, 200], nargs='+', type=int,
                         help='milestones of MultiStepLR')
+    # >>>>>>>>>>>>>>>learning rate schedule END=============
 
-    parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
-                        metavar='LR', help='initial learning rate', dest='lr')
-    parser.add_argument('--warmup-epoch', type=int, default=-3, help='warm up epoch')
-    parser.add_argument('--warmup-multiplier', type=float, default=10, help='warm up multiplier')
+    # =========================DNQ<<<<<<<<<<<<<<<<<<<<<<<<<<<
+    dnq_scheduler_choice = ['MultiStepDNQ']
+    parser.add_argument('--dnq-scheduler', default='MultiStepDNQ', choices=dnq_scheduler_choice)
+    parser.add_argument('--dnq-gamma', default=2, type=float)
+    parser.add_argument('--dnq-milestones', default=[100], nargs='+', type=int,
+                        help='milestones of MultiStepDNQ')
+    # >>>>>>>>>>>>>>>>>>>>>>>>DNQ END=========================
 
-    parser.add_argument('-b', '--batch-size', default=256, type=int,
-                        metavar='N',
-                        help='mini-batch size (default: 256), this is the total '
-                             'batch size of all GPUs on the current node when '
-                             'using Data Parallel or Distributed Data Parallel')
-    parser.add_argument('-p', '--print-freq', default=50, type=int,
-                        metavar='N', help='print frequency (default: 10)')
-    parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
-                        help='evaluate model on validation set')
     parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                         help='use pre-trained model')
 
@@ -79,14 +92,19 @@ def get_base_parser():
                         metavar='W', help='weight decay (default: 1e-4)',
                         dest='weight_decay')
     parser.add_argument('--log-name', default='log', type=str)
+
+    # =====================Generate model key map<<<<<<<<<<<<<<<<<<<<<<<<<<<
     parser.add_argument('--gen-map', action='store_true', default=False,
                         help='generate key map for quantized model')
     parser.add_argument('--original-model', default='', type=str,
                         help='original model')
+    # >>>>>>>>>>>>>>>>>>>Generate model key map END=======================
+
     parser.add_argument('--bn-fusion', action='store_true', default=False,
                         help='ConvQ + BN fusion')
     parser.add_argument('--resave', action='store_true', default=False,
                         help='resave the model')
+
     parser.add_argument('--quant-bias-scale', action='store_true', default=False,
                         help='Add Qcode for scale and quantize bias')
     parser.add_argument('--extract-inner-data', action='store_true', default=False,
@@ -94,8 +112,10 @@ def get_base_parser():
     parser.add_argument('--export-onnx', action='store_true', default=False,
                         help='Export model to onnx')
 
+    # ===========================multi-gpu training<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     parser.add_argument('--world-size', default=-1, type=int,
                         help='number of nodes for distributed training')
+    parser.add_argument('--local_rank', type=int, default=0)
     parser.add_argument('--rank', default=-1, type=int,
                         help='node rank for distributed training')
     parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
@@ -111,14 +131,14 @@ def get_base_parser():
                         help='GPU id to use.')
     parser.add_argument('--gpus', default=None, type=str,
                         help='GPUs id to use.You can specify multiple GPUs separated by ,')
+    # >>>>>>>>>>>>>>>>>>>>>>>>>multi-gpu training END==============================
+
     parser.add_argument('--seed', default=None, type=int,
                         help='seed for initializing training. ')
 
-    parser.add_argument('--qa', default=4, type=int,
+    parser.add_argument('--qa', default=0, type=int,
                         help='quantized activation bit')
-    # parser.add_argument('--init-rate', default=0.99, type=float,
-    #                     help='init rate for activation')
-    parser.add_argument('--qw', default=4, type=int,
+    parser.add_argument('--qw', default=0, type=int,
                         help='quantized weight bit')
     parser.add_argument('--q-mode', choices=q_modes_choice, default='kernel_wise',
                         help='Quantization modes: ' +
@@ -129,7 +149,6 @@ def get_base_parser():
     parser.add_argument('--debug', action='store_true', default=False,
                         help='save running scale in tensorboard')
     parser.add_argument('--freeze-bn', action='store_true', default=False, help='Freeze BN')
-    parser.add_argument('--dali', action='store_true', default=False, help='Use DALI dataloader for faster')
     return parser
 
 
@@ -149,10 +168,16 @@ def get_lr_scheduler(optimizer, args):
     if args.warmup_epoch <= 0:
         return scheduler_next
     print('Use warmup scheduler')
-    scheduler_warmup = GradualWarmupScheduler(optimizer, multiplier=args.warmup_multiplier,
-                                              total_epoch=args.warmup_epoch,
-                                              after_scheduler=scheduler_next)
-    return scheduler_warmup
+    lr_scheduler = GradualWarmupScheduler(optimizer, multiplier=args.warmup_multiplier,
+                                          total_epoch=args.warmup_epoch,
+                                          after_scheduler=scheduler_next)
+    return lr_scheduler
+
+
+def get_dnq_scheduler(model, args):
+    print('Use MultiStepDNQ scheduler, milestones: {}, gamma: {}'.format(args.dnq_milestones, args.dnq_gamma))
+    scheduler = dnq_scheduler.MultiStepDNQ(model, milestones=args.dnq_milestones, gamma=args.dnq_gamma, nbits=args.qw)
+    return scheduler
 
 
 def accuracy(output, target, topk=(1,)):
@@ -252,7 +277,15 @@ def validate(val_loader, model, criterion, args):
     return top1.avg, top5.avg
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args, writer):
+def is_finish(finishes):
+    finish = True
+    for f in finishes:
+        finish = finish and f
+    return finish
+
+
+def train(train_loader, model, criterion, optimizer, epoch, args, writer, criterion_admm=None,
+          admm_scheduler=None):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -271,28 +304,28 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer):
     for i, data in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
-        if args.dali:
-            inputs = data[0]["data"]
-            targets = data[0]["label"].squeeze().long()
-        else:
-            inputs = data[0]
-            targets = data[1]
+        inputs = data[0]
+        targets = data[1]
         if args.gpu is not None:
             inputs = inputs.cuda(args.gpu, non_blocking=True)
             targets = targets.cuda(args.gpu, non_blocking=True)
-
+        elif args.gpus is not None:
+            inputs = inputs.cuda(non_blocking=True)
+            targets = targets.cuda(non_blocking=True)
         # compute output
         output = model(inputs)
         loss = criterion(output, targets)
-
+        if criterion_admm is not None:
+            loss += criterion_admm(model, admm_scheduler.Z, admm_scheduler.U)
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, targets, topk=(1, 5))
         losses.update(loss.item(), inputs.size(0))
         top1.update(acc1[0], inputs.size(0))
         top5.update(acc5[0], inputs.size(0))
-        writer.add_scalar('train/lr', optimizer.param_groups[0]['lr'], base_step + i)
-        writer.add_scalar('train/acc1', top1.avg, base_step + i)
-        writer.add_scalar('train/acc5', top5.avg, base_step + i)
+        if writer is not None:
+            writer.add_scalar('train/lr', optimizer.param_groups[0]['lr'], base_step + i)
+            writer.add_scalar('train/acc1', top1.avg, base_step + i)
+            writer.add_scalar('train/acc5', top5.avg, base_step + i)
         # compute gradient and do SGD step
         # optimizer.param_groups[0]['params']:
         loss.backward()
@@ -305,8 +338,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer):
 
         if i % args.print_freq == 0:
             progress.print(i)
-            if args.debug:
+            if writer is not None and args.debug:
                 for k, v in model.state_dict().items():
+                    if 'module.' in k and args.gpus is not None:
+                        k = k[7:]
                     if 'alpha' in k or 'scale' in k:
                         if v.shape[0] == 1:
                             writer.add_scalar('train/{}/{}'.format(args.arch, k), v.item(), base_step + i)
@@ -315,15 +350,18 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer):
     return
 
 
-def get_summary_writer(args):
-    if 'q' in args.arch:
-        args.log_name = 'logger/{}_w{}a{}_{}'.format(args.arch, args.qw, args.qa,
-                                                     args.log_name)
-    else:
-        args.log_name = 'logger/{}_{}'.format(args.arch,
-                                              args.log_name)
-    writer = SummaryWriter(args.log_name)
-    return writer
+def get_summary_writer(args, ngpus_per_node):
+    if not args.multiprocessing_distributed or (args.multiprocessing_distributed
+                                                and args.rank % ngpus_per_node == 0):
+        if 'q' in args.arch:
+            args.log_name = 'logger/{}_w{}a{}_{}'.format(args.arch, args.qw, args.qa,
+                                                         args.log_name)
+        else:
+            args.log_name = 'logger/{}_{}'.format(args.arch,
+                                                  args.log_name)
+        writer = SummaryWriter(args.log_name)
+        return writer
+    return None
 
 
 def main_gen_key_map(args, model, models):
@@ -352,13 +390,17 @@ def get_model_info(model, args, input_size=(3, 224, 224)):
         input_size = input_size.dataset.__getitem__(0)[0].shape
         input_size = (input_size[0], input_size[1], input_size[2])
     with open('{}/{}_flops.txt'.format(args.log_name, args.arch), 'w') as f:
-        flops, params = get_model_complexity_info(model, input_size, as_strings=True, print_per_layer_stat=True,
-                                                  ost=f)
+        try:
+            flops, params = get_model_complexity_info(model, input_size, as_strings=True, print_per_layer_stat=True,
+                                                      ost=f)
+        except:
+            print('get model info error')
+            return None
     print('{:<30}  {:<8}'.format('Computational complexity: ', flops))
     print('{:<30}  {:<8}'.format('Number of parameters: ', params))
     with open('{}/{}.txt'.format(args.log_name, args.arch), 'w') as wf:
         wf.write(str(model))
-    summary(model, input_size)
+    # summary(model, input_size)
     if args.export_onnx:
         dummy_input = torch.randn(1, input_size[0], input_size[1], input_size[2], requires_grad=True).cuda(args.gpu)
         # torch_out = model(dummy_input)
@@ -380,7 +422,7 @@ def save_checkpoint(state, is_best, prefix, filename='checkpoint.pth.tar'):
     return
 
 
-def process_model(model, optimizer, args):
+def process_model(model, optimizer, args, conv_name=None, **kwargs_conv):
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -389,6 +431,7 @@ def process_model(model, optimizer, args):
             model.load_state_dict(checkpoint['state_dict'])  # GPU memory leak. todo
 
             if not args.quant_bias_scale:
+                # todo: del
                 args.start_epoch = checkpoint['epoch']
                 best_acc1 = checkpoint['best_acc1']
                 optimizer.load_state_dict(checkpoint['optimizer'])
@@ -403,6 +446,12 @@ def process_model(model, optimizer, args):
                 # save pth here
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
+    if conv_name is not None:
+        print('replace conv {}'.format(conv_name))
+        wrapper.replace_conv_recursively(model, conv_name, **kwargs_conv)
+        print('after conv replacement')
+        print(model)
+        args.arch = '{}_{}'.format(args.arch, conv_name)
 
     if args.bn_fusion:
         print('BN fusion begin')
@@ -414,6 +463,7 @@ def process_model(model, optimizer, args):
             torch.save(model.state_dict(), '{}_wo_bn.pth'.format(args.arch))
 
     if args.quant_bias_scale:
+        # todo: del this
         print('add qcode for scale and quantize bias')
         model = wrapper.quantize_scale_and_bias(model)
         print('after quantize scale and bias')
@@ -423,7 +473,7 @@ def process_model(model, optimizer, args):
         if os.path.isfile(args.resume_after):
             print('=> loading checkpoint {}'.format(args.resume_after))
             checkpoint = torch.load(args.resume_after, map_location='cpu')
-            model.load_state_dict(checkpoint['state_dict'])
+            model.load_state_dict(checkpoint['state_dict'], strict=False)
             model.cuda(args.gpu)
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
@@ -443,10 +493,10 @@ def process_model(model, optimizer, args):
 class DataloaderFactory(object):
     cifar10 = 1
     cifar10_positive_shift = 2
-    gcommand = 3
-    gcommand_positive_shift = 4
     imagenet2012 = 5
-    grapheme = 6
+    caltech101 = 7
+    cifar100 = 8
+    flower102 = 9
 
     def __init__(self, args):
         self.args = args
@@ -478,8 +528,13 @@ class DataloaderFactory(object):
         if data_type == self.cifar10:
             trainset = torchvision.datasets.CIFAR10(root=args.data, train=True, download=True,
                                                     transform=self.cifar10_transform_train)
-            train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True,
-                                                       num_workers=args.workers)
+            if args.distributed:
+                train_sampler = torch.utils.data.distributed.DistributedSampler(trainset)
+            else:
+                train_sampler = None
+            train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size,
+                                                       shuffle=(train_sampler is None),
+                                                       num_workers=args.workers, sampler=train_sampler)
             testset = torchvision.datasets.CIFAR10(root=args.data, train=False, download=True,
                                                    transform=self.cifar10_transform_val)
             val_loader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False,
@@ -491,26 +546,6 @@ class DataloaderFactory(object):
                                                        num_workers=args.workers)
             testset = torchvision.datasets.CIFAR10(root=args.data, train=False, download=True,
                                                    transform=self.cifar10_positive_shift_transform_val)
-            val_loader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False,
-                                                     num_workers=args.workers)
-        elif data_type == self.gcommand_positive_shift:
-            trainset = cus_datasets.GCommandMFCC(root=args.data + '/train', windows_stride=(500, 250),
-                                                 positive_shift=True)
-            train_loader = torch.utils.data.DataLoader(
-                trainset, batch_size=args.batch_size, shuffle=True,
-                num_workers=args.workers, pin_memory=True, sampler=None)
-            testset = cus_datasets.GCommandMFCC(root=args.data + '/val', windows_stride=(500, 250),
-                                                positive_shift=True)
-            val_loader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=True,
-                                                     num_workers=args.workers)
-        elif data_type == self.gcommand:
-            trainset = cus_datasets.GCommandMFCC(root=args.data + '/train', windows_stride=(500, 250),
-                                                 positive_shift=False)
-            train_loader = torch.utils.data.DataLoader(
-                trainset, batch_size=args.batch_size, shuffle=True,
-                num_workers=args.workers, pin_memory=True, sampler=None)
-            testset = cus_datasets.GCommandMFCC(root=args.data + '/val', windows_stride=(500, 250),
-                                                positive_shift=False)
             val_loader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False,
                                                      num_workers=args.workers)
         elif data_type == self.imagenet2012:
@@ -537,13 +572,6 @@ class DataloaderFactory(object):
                 train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
                 num_workers=args.workers, pin_memory=True, sampler=train_sampler)
             args.batch_num = len(train_loader)
-            if args.dali:
-                train_loader = DataLoaders_DALI.get_imagenet_iter_dali(type='train',
-                                                                       image_dir=args.data,
-                                                                       batch_size=args.batch_size,
-                                                                       num_threads=args.workers, crop=224,
-                                                                       device_id=args.gpu,
-                                                                       num_gpus=1)
 
             val_loader = torch.utils.data.DataLoader(
                 torchvision.datasets.ImageFolder(valdir, transforms.Compose([
@@ -552,19 +580,97 @@ class DataloaderFactory(object):
                     transforms.ToTensor(),
                     normalize,
                 ])),
-                batch_size=args.batch_size, shuffle=False,
+                batch_size=64, shuffle=False,
                 num_workers=args.workers, pin_memory=True)
+            # todo: args.batch_size
             return train_loader, val_loader, train_sampler
-        elif data_type == self.grapheme:
-            train_dataset = cus_datasets.Grapheme(root=args.data, _type='train')
-            test_dataset = cus_datasets.Grapheme(root=args.data, _type='test')
-            train_loader = torch.utils.data.DataLoader(
-                train_dataset, batch_size=args.batch_size, shuffle=True,
-                num_workers=args.workers, pin_memory=True)
-            val_loader = torch.utils.data.DataLoader(
-                test_dataset, batch_size=args.batch_size, shuffle=False,
-                num_workers=args.workers, pin_memory=True
-            )
+
+        elif data_type == self.caltech101:
+            transform_train = transforms.Compose([
+                transforms.Resize(36),
+                transforms.RandomCrop(32),
+                # transforms.Resize(72),
+                # transforms.RandomCrop(64),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            ])
+
+            transform_test = transforms.Compose([
+                transforms.Resize([32, 32]),
+                # transforms.RandomCrop(32),
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            ])
+
+            train_data = torchvision.datasets.ImageFolder(args.data + '/train', transform=transform_train)
+            valid_data = torchvision.datasets.ImageFolder(args.data + '/val', transform=transform_test)
+
+            train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
+                                                       num_workers=args.workers)
+            val_loader = torch.utils.data.DataLoader(valid_data, batch_size=args.batch_size, num_workers=args.workers)
+        elif data_type == self.cifar100:
+            transform_train = transforms.Compose([
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            ])
+
+            transform_test = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            ])
+
+            trainset = torchvision.datasets.CIFAR100(root=args.data, train=True, download=True,
+                                                     transform=transform_train)
+            train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True,
+                                                       num_workers=args.workers)
+            args.batch_num = len(train_loader)
+            testset = torchvision.datasets.CIFAR100(root=args.data, train=False, download=True,
+                                                    transform=transform_test)
+            val_loader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False,
+                                                     num_workers=args.workers)
+        elif data_type == self.flower102:
+            # The input size can be set to 224
+            # https://github.com/MiguelAMartinez/flowers-image-classifier/blob/master/utils_ic.py#L19
+            # transform_train = transforms.Compose([transforms.RandomRotation(30),
+            #                                       transforms.Resize(255),
+            #                                       transforms.CenterCrop(224),
+            #                                       transforms.RandomHorizontalFlip(),
+            #                                       transforms.ToTensor(),
+            #                                       transforms.Normalize([0.485, 0.456, 0.406],
+            #                                                            [0.229, 0.224, 0.225])])
+            #
+            # transform_test = transforms.Compose([transforms.Resize(255),
+            #                                      transforms.CenterCrop(224),
+            #                                      transforms.ToTensor(),
+            #                                      transforms.Normalize([0.485, 0.456, 0.406],
+            #                                                           [0.229, 0.224, 0.225])])
+
+            transform_train = transforms.Compose([
+                transforms.Resize(36),
+                transforms.RandomCrop(32),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            ])
+
+            transform_test = transforms.Compose([
+                transforms.Resize([32, 32]),
+                # transforms.RandomCrop(32),
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            ])
+
+            train_data = torchvision.datasets.ImageFolder(args.data + '/train', transform=transform_train)
+            test_data = torchvision.datasets.ImageFolder(args.data + '/valid', transform=transform_test)
+            valid_data = torchvision.datasets.ImageFolder(args.data + '/test', transform=transform_test)
+
+            train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
+                                                       num_workers=args.workers)
+            test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size, num_workers=args.workers)
+            val_loader = torch.utils.data.DataLoader(valid_data, batch_size=args.batch_size, num_workers=args.workers)
         else:
             assert NotImplementedError
         return train_loader, val_loader
@@ -607,3 +713,38 @@ class AverageMeter(object):
     def __str__(self):
         fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
         return fmtstr.format(**self.__dict__)
+
+
+def distributed_model(model, ngpus_per_node, args):
+    if not torch.cuda.is_available():
+        print('using CPU, this will be slow')
+    elif args.distributed:
+        # For multiprocessing distributed, DistributedDataParallel constructor
+        # should always set the single device scope, otherwise,
+        # DistributedDataParallel will use all available devices.
+        if args.gpu is not None:
+            torch.cuda.set_device(args.gpu)
+            model.cuda(args.gpu)
+
+            # When using a single GPU per process and per
+            # DistributedDataParallel, we need to divide the batch size
+            # ourselves based on the total number of GPUs we have
+            args.batch_size = int(args.batch_size / ngpus_per_node)
+            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        else:
+            model.cuda()
+            # DistributedDataParallel will divide and allocate batch_size to all
+            # available GPUs if device_ids are not set
+            model = torch.nn.parallel.DistributedDataParallel(model)
+    elif args.gpu is not None:
+        torch.cuda.set_device(args.gpu)
+        model = model.cuda(args.gpu)
+    else:
+        # DataParallel will divide and allocate batch_size to all available GPUs
+        if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
+            model.features = torch.nn.DataParallel(model.features)
+            model.cuda()
+        else:
+            model = torch.nn.DataParallel(model).cuda()
+    return model

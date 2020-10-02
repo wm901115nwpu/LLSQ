@@ -1,7 +1,6 @@
 import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
-from models.modules import TSVDLinear, truncated_svd
-import ipdb
+from models._modules import TSVDLinear, truncated_svd
 
 __all__ = ['AlexNetSVD', 'alexnet_svd', 'alexnet_split']
 

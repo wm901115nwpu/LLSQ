@@ -6,7 +6,7 @@ import math
 import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
 
-from models.modules import ActQ, Conv2dQ, LinearQ, Qmodes, LinearQv2, Conv2dQv2, ActQv2
+from models._modules import ActQ, Conv2dQ, LinearQ, Qmodes, LinearQv2, Conv2dQv2, ActQv2
 from models.imagenet import load_fake_quantized_state_dict
 
 __all__ = ['MobileNetV2Q', 'mobilenetv2_q', 'mobilenetv2_qv2', 'mobilenetv2_qfnv2']

@@ -1,0 +1,8 @@
+{
+  "conv1.1.weight": "conv1.0.weight",
+  "conv1.1.bias": "conv1.0.bias",
+  "fc1.1.weight": "fc1.0.weight",
+  "fc1.1.bias": "fc1.0.bias",
+  "fc2.weight": "fc2.weight",
+  "fc2.bias": "fc2.bias"
+}

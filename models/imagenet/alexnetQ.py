@@ -3,21 +3,39 @@ import torch.utils.model_zoo as model_zoo
 
 import sys
 
-from models.modules import ActQ, Conv2dQ, LinearQ, PACT, ActQv2, Conv2dQv2, LinearQv2, DropoutScale
+from models._modules import ActQ, Conv2dQ, LinearQ, PACT, ActQv2, Conv2dQv2, LinearQv2, DropoutScale
 from models.imagenet import load_fake_quantized_state_dict
-from models.modules import Qmodes
-import models.modules as my_nn
+from models._modules import Qmodes
+import models._modules as my_nn
 from models import load_pre_state_dict
-import ipdb
 
 # TODO: Re-structure the code.
 __all__ = ['_AlexNetQ', 'AlexNetQ', 'alexnet_q', 'alexnet_qfn', 'alexnet_qfi',
            'alexnet_q_pact', 'alexnet_qv2', 'alexnet_qfnv2',
-           'alexnet_lsq', 'alexnet_llsq']
+           'alexnet_lsq', 'alexnet_llsq', 'alexnet_dnq']
 
 model_urls = {
     'alexnet': 'https://download.pytorch.org/models/alexnet-owt-4df8aa71.pth',
 }
+
+
+def alexnet_dnq(pretrained=False, **kwargs):
+    """VGG small model (configuration "A")
+    Please use [dataset]_[architecture]_[quan_type] as the function name
+
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+
+    """
+    model_name = sys._getframe().f_code.co_name
+    quan_type = model_name.split('_')[-1]
+    quan_factory = my_nn.QuantizationFactory(quan_type, **kwargs)
+    model = _AlexNetQ(qf=quan_factory)
+    if pretrained:
+        assert NotImplementedError
+        # load_pre_state_dict(model, model_zoo.load_url(model_urls['alexnet']),
+        #                     '{}_map.json'.format(model_name))
+    return model
 
 
 def alexnet_llsq(pretrained=False, **kwargs):
