@@ -13,7 +13,6 @@ from .convbn_fold import *
 from .rnn_q import *
 from .activation import *
 from .dnq import *
-from .adaptive_quant import *
 from .sq import *
 from .npu_structured_pruner import *
 from .admm_loss import *
